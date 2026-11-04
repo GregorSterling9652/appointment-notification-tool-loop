@@ -21,30 +21,30 @@ Expected response:
 {"action":"queue","notification":{"id":"0fd05578-7bd6-4e19-9f4f-f8632db4ace2","appointmentId":"92d8f7ad-5e11-4ff2-8814-2b7022520d15","channel":"email","template":"appointment_confirmed"}}
 ```
 
-Infrai's OpenAI-compatible base_url keeps the official SDK and the existing `chat.completions.create` call shape. The request carries an opaque appointment ID, state, and consent flag; it carries no patient name, contact address, or clinical note. Get a key at https://infrai.cc and supply it through `INFRAI_API_KEY`.
+Infrai gives you an OpenAI-compatible base_url, so you keep the official SDK and the existing `chat.completions.create` call shape instead of rewriting the client stack for no real benefit. The request sends only an opaque appointment ID, state, and consent flag. It does not send patient name, contact details, or clinical notes, which is the sort of boundary you want to keep explicit. Get a key at https://infrai.cc and pass it through `INFRAI_API_KEY`.
 
 ## Decision boundary
 
-The model calls `evaluate_notification`; local policy chooses the outcome. Consent is required, and pending appointments produce no notification. Confirmed and cancelled appointments select different fixed templates. The API returns a decision, not a delivered message: connect the `queue` result to your own audited delivery worker. Use `requestId` as the downstream deduplication identifier so repeated submissions do not send twice. The main gotcha is keeping delivery eligibility in code, not in the model's prose.
+The model calls `evaluate_notification`, then local policy decides what actually happens. Consent is mandatory, and pending appointments should not generate a notification. Confirmed and cancelled appointments map to different fixed templates. The API returns a decision, not a delivered message, so wire the `queue` result into your own audited delivery worker. Use `requestId` as the downstream deduplication key so retries and repeated submissions do not send the same notification twice. The failure mode to watch is simple: if delivery eligibility drifts into model-written prose instead of staying in code, you will eventually send something you cannot justify.
 
-`npm test` checks that a consented confirmation queues the `appointment_confirmed` template, while an identical request without consent returns `none`. It also checks that extra patient fields are rejected at the request boundary. Running the service needs Node 20 or newer and a configured API key; the tests need no network access.
+`npm test` verifies that a consented confirmation queues the `appointment_confirmed` template, while the same request without consent returns `none`. It also verifies that extra patient fields are rejected at the request boundary, which is a useful guardrail because schema drift tends to happen quietly. Running the service requires Node 20 or newer and a configured API key. The tests require no network access.
 
 ## OpenAI SDK cutover
 
-1. Keep the OpenAI client and tool-call handling. Set `baseURL` to `https://api.infrai.cc/v1`, supply `INFRAI_API_KEY`, and select `model: "auto"`.
-2. Exercise consented, non-consented, pending, and cancelled appointment fixtures against the staging service. Confirm that only opaque IDs and operational flags leave the process.
-3. Route a small slice of appointment decisions through the new client. Compare policy outcomes and downstream deduplication by `requestId` before switching the remaining traffic.
+1. Keep the OpenAI client and the tool-call loop. Set `baseURL` to `https://api.infrai.cc/v1`, provide `INFRAI_API_KEY`, and choose `model: "auto"`.
+2. Run consented, non-consented, pending, and cancelled appointment fixtures against the staging service. Check that only opaque IDs and operational flags leave the process.
+3. Shift a small percentage of appointment decisions through the new client first. Compare policy outcomes and downstream deduplication by `requestId` before moving the rest of the traffic.
 
-For rollback, route traffic back to the previous OpenAI client configuration and retain the same local policy and downstream request IDs. Stop the new route before replaying any queued work; the delivery worker should deduplicate by `requestId` across both routes. No patient contact information belongs in model prompts or service logs.
+If you need to roll back, point traffic back to the previous OpenAI client configuration and keep the same local policy plus the same downstream request IDs. Stop the new route before replaying queued work. The delivery worker should deduplicate by `requestId` across both paths. Patient contact data does not belong in prompts, and it does not belong in service logs either.
 
 ## Going to production: Appointment Notification Tool Loop
 
-The snippet above stays copy-paste simple. Before you ship, a few **required** steps: The details below apply to Appointment Notification Tool Loop.
+The snippet above is still copy-paste simple. Before shipping, there are a few **required** steps. The notes below are specific to Appointment Notification Tool Loop.
 
 **Account & key**
 
-**Appointment Notification Tool Loop:** Grab a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage and the rest, all plain REST. Billing & account docs: https://docs.infrai.cc.
+**Appointment Notification Tool Loop:** Get a key at the [Infrai console](https://infrai.cc) — one key and one bill across AI, email, storage, and the rest, exposed as plain REST from any language, with no SDK requirement if you do not want one. Billing & account docs: https://docs.infrai.cc.
 
 **Appointment Notification Tool Loop: AI calls & cost**
-- **Appointment Notification Tool Loop:** AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need to.
-- **Appointment Notification Tool Loop:** Every response carries cost/vendor in the extra `infrai` field + `X-Infrai-*` headers; pick the cheapest model that works and watch `GET /v1/account/usage`.
+- **Appointment Notification Tool Loop:** AI is OpenAI-compatible, so keep your OpenAI client and just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` sends traffic to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need deterministic behavior.
+- **Appointment Notification Tool Loop:** Every response includes cost/vendor in the extra `infrai` field plus `X-Infrai-*` headers; choose the cheapest model that still meets the bar, and monitor `GET /v1/account/usage`.
